@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import "./App.css";
 import VesselSelection from "./components/VesselSelection";
 import SyncStatus from "./components/SyncStatus";
@@ -8,17 +8,31 @@ import { calculateSounding } from "./utils/interpolation";
 import { useOnlineStatus } from "./hooks/useOnlineStatus";
 import { v4 as uuidv4 } from "uuid";
 import { getLambdaUrl, saveLambdaUrl, logConfig } from "./config";
+import { requestPersistentStorage, estimateStorage, formatBytes } from "./utils/storage";
+import { usePackageUpdateChecker } from "./hooks/usePackageUpdateChecker";
+import AdminPanel from "./components/AdminPanel";
 
 function App() {
   // Connection and compartments
-  const [lambdaUrl, setLambdaUrl] = useState(() => getLambdaUrl() || "");
-  const [connected, setConnected] = useState(() => !!getLambdaUrl());
+  // Initialize from deep link first, then fallback to saved/env
+  const searchParams = new URLSearchParams(window.location.search);
+  const lambdaFromQuery = searchParams.get('lambda');
+  const vesselFromQuery = searchParams.get('vesselId');
+  const installFromQuery = searchParams.get('install');
+  if (lambdaFromQuery) {
+    try { saveLambdaUrl(new URL(lambdaFromQuery).toString()); } catch {}
+  }
+  const [lambdaUrl, setLambdaUrl] = useState(() => (lambdaFromQuery || getLambdaUrl() || ""));
+  const [connected, setConnected] = useState(true);
+  const initialInstallRan = useRef(false);
   const [compartments, setCompartments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [vesselSelected, setVesselSelected] = useState(false);
   const [currentVessel, setCurrentVessel] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
 
   const isOnline = useOnlineStatus();
   const fuelGrades = ["HSFO", "VLSFO", "ULSFO", "LSMGO", "MGO", "BIOFUEL"];
@@ -75,8 +89,62 @@ function App() {
   // Check for vessel data on mount and log configuration
   useEffect(() => {
     logConfig(); // Log app configuration
-    checkVesselData();
+    // Request persistent storage and log storage estimate
+    (async () => {
+      const persistence = await requestPersistentStorage();
+      const estimate = await estimateStorage();
+      if (persistence.supported) {
+        console.log(`Storage persistence: ${persistence.persisted ? 'granted' : 'not granted'}`);
+      }
+      if (estimate.supported) {
+        const quota = estimate.quota ? formatBytes(estimate.quota) : 'unknown';
+        const usage = estimate.usage ? formatBytes(estimate.usage) : 'unknown';
+        console.log(`Storage usage: ${usage} / ${quota}`);
+      }
+    })();
+    // Deep link handling: run once after mount if params present
+    (async () => {
+      if (initialInstallRan.current) return;
+      initialInstallRan.current = true;
+      await checkVesselData();
+      if (lambdaFromQuery && vesselFromQuery && installFromQuery === '1') {
+        try {
+          const { downloadVesselDataPackage } = await import('./db/dataPackageService');
+          await downloadVesselDataPackage(lambdaFromQuery || lambdaUrl, vesselFromQuery);
+          const vessel = await getVesselInfo();
+          setCurrentVessel(vessel);
+          setVesselSelected(true);
+          await loadCompartmentsFromDB();
+        } catch (e) {
+          console.error('Deep link install failed:', e);
+        }
+      }
+    })();
   }, []);
+
+  // Background package update checker
+  const { updateInfo, dismiss } = usePackageUpdateChecker({
+    lambdaUrl,
+    vessel: currentVessel,
+    intervalMs: 5 * 60 * 1000
+  });
+
+  const installUpdateNow = async () => {
+    if (!currentVessel) return;
+    try {
+      setInstallingUpdate(true);
+      const { downloadVesselDataPackage } = await import('./db/dataPackageService');
+      await downloadVesselDataPackage(lambdaUrl, currentVessel.vessel_id);
+      const vessel = await getVesselInfo();
+      setCurrentVessel(vessel);
+      await loadCompartmentsFromDB();
+      dismiss();
+    } catch (e) {
+      console.error('Update install failed:', e);
+    } finally {
+      setInstallingUpdate(false);
+    }
+  };
 
   async function checkVesselData() {
     const hasData = await hasVesselData();
@@ -568,50 +636,7 @@ function App() {
   };
 
   // UI
-  if (!connected) {
-    return (
-      <div className="app">
-        <div className="connection-container">
-          <div className="app-logo">
-            <img 
-              src="/bunkerwatch-logo.svg" 
-              alt="BunkerWatch" 
-              className="logo-icon-large"
-              width="120" 
-              height="120"
-            />
-            <div>
-              <h1>
-                <span className="logo-bunker">Bunker</span>
-                <span className="logo-watch">Watch</span>
-              </h1>
-              <p className="connection-subtitle">Maritime Tank Sounding & Bunkering</p>
-            </div>
-          </div>
-          <div className="form-group">
-            <label>Lambda Function URL</label>
-            <input
-              type="url"
-              value={lambdaUrl}
-              onChange={(e) => setLambdaUrl(e.target.value)}
-              placeholder="https://your-lambda-url.lambda-url.region.on.aws"
-            />
-            <small>
-              Enter your AWS Lambda Function URL (without trailing slash)
-            </small>
-          </div>
-          <button
-            onClick={connectToLambda}
-            disabled={loading}
-            className="connect-btn"
-          >
-            {loading ? "Connecting..." : "Connect & Continue"}
-          </button>
-          {error && <div className="error-message">{error}</div>}
-        </div>
-      </div>
-    );
-  }
+  // Connection screen removed: app starts directly
 
   if (!vesselSelected) {
     return (
@@ -621,7 +646,6 @@ function App() {
             lambdaUrl={lambdaUrl} 
             onVesselSelected={handleVesselSelected}
             disableAutoSelect={true}
-            onBack={() => setConnected(false)}
           />
         </div>
       </div>
@@ -631,6 +655,28 @@ function App() {
   return (
     <div className="app">
       <div className="main-container">
+        {currentVessel && updateInfo && (
+          <div className="sync-status-bar" style={{ marginBottom: 8 }}>
+            <div className="sync-status-left">
+              <div className="pending-count">
+                <span className="pending-icon">⬆️</span>
+                <span>Package update available: v{updateInfo.latestVersion}</span>
+              </div>
+            </div>
+            <div className="sync-status-right">
+              <button 
+                onClick={installUpdateNow}
+                disabled={installingUpdate}
+                className="sync-btn"
+              >
+                {installingUpdate ? 'Updating…' : 'Install Update'}
+              </button>
+              <button onClick={dismiss} className="btn-secondary" style={{ marginLeft: 8 }}>
+                Later
+              </button>
+            </div>
+          </div>
+        )}
         <div className="header">
           <div className="app-logo-small">
             <button onClick={resetConnection} className="back-to-main-btn" title="Back to Main">
@@ -652,6 +698,10 @@ function App() {
             <span className="status-connected">
               ✅ {compartments.length} tanks • {isOnline ? "Online" : "Offline"}
             </span>
+            {!lambdaUrl && (
+              <span className="error-message" style={{ marginLeft: 8 }}>Lambda URL not configured</span>
+            )}
+            <button onClick={() => setShowAdmin(true)} className="btn-secondary" style={{ marginLeft: 8 }}>Admin</button>
           </div>
         </div>
 
@@ -1193,6 +1243,12 @@ function App() {
         <Settings
           onClose={() => setShowSettings(false)}
           onLambdaUrlUpdated={handleLambdaUrlUpdated}
+        />
+      )}
+      {showAdmin && (
+        <AdminPanel
+          lambdaUrl={lambdaUrl}
+          onClose={() => setShowAdmin(false)}
         />
       )}
     </div>

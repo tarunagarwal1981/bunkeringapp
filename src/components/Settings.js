@@ -1,12 +1,29 @@
 // BunkerWatch Settings Component
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { getLambdaUrl, saveLambdaUrl, clearLambdaUrl, getAppConfig } from '../config';
+import { requestPersistentStorage, estimateStorage, formatBytes } from '../utils/storage';
 
 function Settings({ onClose, onLambdaUrlUpdated }) {
   const [lambdaUrl, setLambdaUrl] = useState(getLambdaUrl() || '');
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const config = getAppConfig();
+  const [storageInfo, setStorageInfo] = useState({ persisted: null, usage: null, quota: null });
+  const [storageLoading, setStorageLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      setStorageLoading(true);
+      const persistence = await requestPersistentStorage();
+      const est = await estimateStorage();
+      setStorageInfo({
+        persisted: persistence.supported ? persistence.persisted : null,
+        usage: est.supported ? est.usage : null,
+        quota: est.supported ? est.quota : null
+      });
+      setStorageLoading(false);
+    })();
+  }, []);
   
   const handleSave = () => {
     if (!lambdaUrl.trim()) {
@@ -126,6 +143,30 @@ function Settings({ onClose, onLambdaUrlUpdated }) {
                 </span>
               </div>
             </div>
+          </div>
+
+          <div className="settings-section">
+            <h3>Storage</h3>
+            {storageLoading ? (
+              <div className="info-grid"><div className="info-item">Loading…</div></div>
+            ) : (
+              <div className="info-grid">
+                <div className="info-item">
+                  <span className="info-label">Persistent Storage:</span>
+                  <span className="info-value">
+                    {storageInfo.persisted === null ? 'Unsupported' : storageInfo.persisted ? '✅ Granted' : '❌ Not granted'}
+                  </span>
+                </div>
+                <div className="info-item">
+                  <span className="info-label">Usage:</span>
+                  <span className="info-value">{storageInfo.usage != null ? formatBytes(storageInfo.usage) : 'Unknown'}</span>
+                </div>
+                <div className="info-item">
+                  <span className="info-label">Quota:</span>
+                  <span className="info-value">{storageInfo.quota != null ? formatBytes(storageInfo.quota) : 'Unknown'}</span>
+                </div>
+              </div>
+            )}
           </div>
           
           <div className="settings-section">

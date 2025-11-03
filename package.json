@@ -8,7 +8,7 @@
     "tank-sounding",
     "fuel-management"
   ],
-  "main": "src/index.tsx",
+  "main": "src/index.js",
   "dependencies": {
     "dexie": "^3.2.4",
     "dexie-react-hooks": "^1.1.6",
@@ -22,7 +22,7 @@
     "@types/react-dom": "19.0.0",
     "ajv": "^8.17.1",
     "loader-utils": "3.2.1",
-    "typescript": "^4.9.5"
+    "typescript": "5.7.2"
   },
   "scripts": {
     "start": "react-scripts start",

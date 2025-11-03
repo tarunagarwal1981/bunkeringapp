@@ -206,6 +206,25 @@ export async function downloadVesselDataPackage(lambdaUrl, vesselId) {
 }
 
 /**
+ * Admin: Trigger package build and return a shareable link
+ */
+export async function adminBuildPackage(lambdaUrl, vesselId, adminCode, ttlSeconds = 86400) {
+  const normalizedUrl = normalizeLambdaUrl(lambdaUrl);
+  const signedUrlEndpoint = `${normalizedUrl}/admin/vessel/${vesselId}/signed-link`;
+  const response = await fetch(signedUrlEndpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Code': adminCode },
+    body: JSON.stringify({ ttl_seconds: ttlSeconds })
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`HTTP ${response.status}: ${response.statusText}${text ? ' - ' + text : ''}`);
+  }
+  const result = await response.json();
+  return { manifestUrl: result.url, version: null, expires: result.expires };
+}
+
+/**
  * Check for data package updates
  */
 export async function checkForDataUpdates(lambdaUrl, vesselId, currentVersion) {
