@@ -1,7 +1,7 @@
 // BunkerWatch Vessel Selection Component
 import React, { useState, useEffect } from 'react';
 import { getVesselInfo } from '../db/database';
-import { downloadVesselDataPackage, fetchVessels } from '../db/dataPackageService';
+import { downloadVesselDataPackage, fetchVessels, checkForDataUpdates } from '../db/dataPackageService';
 
 function VesselSelection({ lambdaUrl, onVesselSelected, onBack, disableAutoSelect = false }) {
   const [vessels, setVessels] = useState([]);
@@ -11,6 +11,8 @@ function VesselSelection({ lambdaUrl, onVesselSelected, onBack, disableAutoSelec
   const [downloadProgress, setDownloadProgress] = useState('');
   const [error, setError] = useState('');
   const [currentVessel, setCurrentVessel] = useState(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState('');
   
   useEffect(() => {
     if (!disableAutoSelect) {
@@ -31,6 +33,11 @@ function VesselSelection({ lambdaUrl, onVesselSelected, onBack, disableAutoSelec
     setLoading(true);
     setError('');
     try {
+      if (!lambdaUrl) {
+        setError('Lambda URL not configured. Open Settings to set it.');
+        setVessels([]);
+        return;
+      }
       const vesselList = await fetchVessels(lambdaUrl);
       setVessels(vesselList);
     } catch (err) {
@@ -77,6 +84,28 @@ function VesselSelection({ lambdaUrl, onVesselSelected, onBack, disableAutoSelec
     setSelectedVesselId('');
     setError('');
   }
+
+  async function handleCheckUpdates() {
+    if (!currentVessel) return;
+    setUpdateChecking(true);
+    setUpdateMessage('Checking for updates...');
+    try {
+      const result = await checkForDataUpdates(lambdaUrl, currentVessel.vessel_id, currentVessel.package_version);
+      if (result && result.update_available) {
+        setUpdateMessage(`Update available: v${result.latest_version}. Downloading...`);
+        await downloadVesselDataPackage(lambdaUrl, currentVessel.vessel_id);
+        await loadCurrentVessel();
+        setUpdateMessage('✓ Updated successfully');
+      } else {
+        setUpdateMessage('✓ You are on the latest package');
+      }
+    } catch (e) {
+      setUpdateMessage(`✗ Update check failed: ${e.message}`);
+    } finally {
+      setUpdateChecking(false);
+      setTimeout(() => setUpdateMessage(''), 4000);
+    }
+  }
   
   if (currentVessel && !disableAutoSelect) {
     return (
@@ -92,6 +121,19 @@ function VesselSelection({ lambdaUrl, onVesselSelected, onBack, disableAutoSelec
               <span>•</span>
               <span>Downloaded: {new Date(currentVessel.downloaded_at).toLocaleDateString()}</span>
             </p>
+            <div>
+              <button 
+                onClick={handleCheckUpdates}
+                disabled={updateChecking}
+                className="download-btn"
+                style={{ padding: '6px 10px', fontSize: '0.9rem' }}
+              >
+                {updateChecking ? 'Checking…' : 'Check for Updates'}
+              </button>
+              {updateMessage && (
+                <span style={{ marginLeft: 10 }}>{updateMessage}</span>
+              )}
+            </div>
           </div>
           {/* <button 
             onClick={handleChangeVessel}

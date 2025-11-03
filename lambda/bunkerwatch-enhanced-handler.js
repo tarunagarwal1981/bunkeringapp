@@ -1,4 +1,5 @@
 const { Pool } = require('pg');
+const crypto = require('crypto');
 const zlib = require('zlib');
 const util = require('util');
 
@@ -16,6 +17,34 @@ const pool = new Pool({
     idleTimeoutMillis: 30000,
     max: 10,
 });
+// ===================== Signing helpers =====================
+const SIGNING_SECRET = process.env.SIGNING_SECRET || '';
+const REQUIRE_SIGNED = (process.env.REQUIRE_SIGNED || 'false').toLowerCase() === 'true';
+const ADMIN_CODE = process.env.ADMIN_CODE || '';
+
+function hmacSha256Hex(message, secret) {
+    return crypto.createHmac('sha256', secret).update(message).digest('hex');
+}
+
+function createSignedToken(vesselId, expiresEpochSeconds) {
+    if (!SIGNING_SECRET) return null;
+    const payload = `${vesselId}:${expiresEpochSeconds}`;
+    return hmacSha256Hex(payload, SIGNING_SECRET);
+}
+
+function validateSignedRequest(vesselId, query) {
+    if (!REQUIRE_SIGNED) return { valid: true };
+    if (!SIGNING_SECRET) return { valid: false, reason: 'Signing not configured' };
+    const token = query?.token;
+    const expires = parseInt(query?.expires || '0', 10);
+    if (!token || !expires) return { valid: false, reason: 'Missing token or expires' };
+    const now = Math.floor(Date.now() / 1000);
+    if (expires < now) return { valid: false, reason: 'Token expired' };
+    const expected = createSignedToken(vesselId, expires);
+    if (expected !== token) return { valid: false, reason: 'Invalid token' };
+    return { valid: true };
+}
+
 
 // Test database connection
 const testConnection = async () => {
@@ -1074,7 +1103,7 @@ exports.handler = async (event) => {
     const headers = {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Code, x-admin-code',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
     };
     
@@ -1131,6 +1160,16 @@ exports.handler = async (event) => {
         // GET /vessel/{vessel_id}/data-package
         if (method === 'GET' && path.match(/^\/vessel\/[^/]+\/data-package$/)) {
             const vesselId = pathParams.vessel_id || path.split('/')[2];
+            // Enforce signature if enabled
+            const queryParams = event.queryStringParameters || {};
+            const sig = validateSignedRequest(vesselId, queryParams);
+            if (!sig.valid) {
+                return {
+                    statusCode: 401,
+                    headers,
+                    body: JSON.stringify({ success: false, error: 'Unauthorized', reason: sig.reason })
+                };
+            }
             const result = await generateVesselDataPackage(vesselId);
             
             // Compress large responses to avoid Lambda payload limit
@@ -1164,6 +1203,34 @@ exports.handler = async (event) => {
                 body: jsonString
             };
         }
+
+        // POST /admin/vessel/{vessel_id}/signed-link
+        if (method === 'POST' && path.match(/^\/admin\/vessel\/[^/]+\/signed-link$/)) {
+            const vesselId = pathParams.vessel_id || path.split('/')[3];
+            // Simple admin code header check
+            const adminHeader = (event.headers?.['x-admin-code'] || event.headers?.['X-Admin-Code'] || '').toString();
+            if (!ADMIN_CODE || adminHeader !== ADMIN_CODE) {
+                return {
+                    statusCode: 403,
+                    headers,
+                    body: JSON.stringify({ success: false, error: 'Forbidden' })
+                };
+            }
+            const body = JSON.parse(event.body || '{}');
+            const ttlSeconds = parseInt(body.ttl_seconds || '86400', 10); // default 1 day
+            const now = Math.floor(Date.now() / 1000);
+            const expires = now + Math.max(60, Math.min(ttlSeconds, 30 * 24 * 3600));
+            const token = createSignedToken(vesselId, expires);
+            if (!token) {
+                return { statusCode: 500, headers, body: JSON.stringify({ success: false, error: 'Signing not configured' }) };
+            }
+            const base = event.requestContext?.http?.path?.replace(/\/admin\/vessel\/.+$/, '') || '';
+            const origin = (event.headers['x-forwarded-proto'] && event.headers['x-forwarded-host'])
+              ? `${event.headers['x-forwarded-proto']}://${event.headers['x-forwarded-host']}`
+              : '';
+            const link = `${origin}/vessel/${vesselId}/data-package?expires=${expires}&token=${token}`;
+            return { statusCode: 200, headers, body: JSON.stringify({ success: true, url: link, expires }) };
+        }
         
         // GET /vessel/{vessel_id}/compartments
         if (method === 'GET' && path.match(/^\/vessel\/[^/]+\/compartments$/)) {
@@ -1173,6 +1240,24 @@ exports.handler = async (event) => {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify(result)
+            };
+        }
+
+        // POST /vessel/{vessel_id}/check-update
+        // Simple implementation: respond with no update available for now.
+        if (method === 'POST' && path.match(/^\/vessel\/[^/]+\/check-update$/)) {
+            const vesselId = pathParams.vessel_id || path.split('/')[2];
+            const body = JSON.parse(event.body || '{}');
+            const currentVersion = body.current_version || 1;
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    success: true,
+                    vessel_id: vesselId,
+                    update_available: false,
+                    latest_version: currentVersion
+                })
             };
         }
         

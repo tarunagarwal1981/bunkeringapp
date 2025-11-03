@@ -11,3 +11,14 @@ root.render(
     <App />
   </StrictMode>
 );
+
+// Register Service Worker for offline caching
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').then((registration) => {
+      // SW registered
+    }).catch(() => {
+      // Ignore registration errors
+    });
+  });
+}
